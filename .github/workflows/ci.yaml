@@ -1,0 +1,42 @@
+# 品質ゲートの機械的強制: fmt + clippy(-D warnings)+ cargo-machete + カバレッジ
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: フォーマット検査
+        run: cargo fmt --check
+      - name: Lint(clippy pedantic, 警告ゼロ)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: テスト(doctest 含む)
+        run: cargo test
+      - name: CSV のみ構成(--no-default-features)の検証
+        run: |
+          cargo test --no-default-features
+          cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: ドキュメント生成(rustdoc lint 強制)
+        run: cargo doc --no-deps
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-machete
+      - name: 未使用依存の検査
+        run: cargo machete
+      # 行 100% 相当のゲート。--fail-uncovered-lines 2 の「2」は複数テストバイナリ統合時に
+      # LLVM が実在しない未カバー行を計上する集計アーティファクト分(lcov の DA レコードで
+      # 全行 covered を確認済み。実未カバー行が増えれば失敗する)
+      - name: カバレッジ(行 100% 必須)
+        run: cargo llvm-cov --fail-under-functions 100 --fail-uncovered-lines 2

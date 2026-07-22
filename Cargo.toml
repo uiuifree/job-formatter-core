@@ -1,0 +1,57 @@
+[package]
+name = "job-formatter-core"
+description = "Industry-agnostic job-feed formatting engine: company CSV/Excel → normalized JSONL → per-media rows. Parallel, order-preserving, fault-isolating, UTF-8/Shift_JIS auto-detection"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+# crates.io へ出す判断をしたらこの行を外す(GitHub 公開だけなら不要)
+publish = false
+readme = "README.md"
+# crates.io 検索・AI アシスタントでの発見性のためのメタデータ(公開時に有効)
+keywords = ["csv", "xlsx", "jsonl", "etl", "shift-jis"]
+categories = ["parser-implementations", "encoding"]
+
+[dependencies]
+# レコード型の直列化契約(ドメイン側が derive で実装する前提の中核 API)
+serde = { version = "1", features = ["derive"] }
+# JSONL 行の生成と raw_payload の監査用 JSON 表現
+serde_json = "1"
+# ステージ別エラー型(ConvertError / RecordError / OutputError)の定義
+thiserror = "2"
+# CSV 解析(RFC4180 準拠の実績ある実装)
+csv = "1"
+# 実データに Shift_JIS の CSV が存在するため(旧システムでも使用実績あり)
+encoding_rs = "0.8"
+# 行単位の並列変換・並列シリアライズ(速度要件: 10 万件を数分以内)
+rayon = "1"
+# Excel(xlsx)読取(pure Rust の事実上の標準。dates はセルの日付判定・ISO 文字列化に必要)
+calamine = { version = "0.35.0", features = ["dates"], optional = true }
+# Excel 日付セルの年月日・時分秒への分解(calamine dates が返す日時型の読み取り)
+chrono = { version = "0.4", default-features = false, optional = true }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "deny"
+dead_code = "deny"
+unused = { level = "deny", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
+
+[features]
+# CSV と Excel が標準。Excel が不要なら default-features = false で外せる
+default = ["excel"]
+excel = ["dep:calamine", "dep:chrono"]
+
+[dev-dependencies]
+# Excel 読取テスト用の xlsx 生成(テストのみ。フィクスチャのバイナリコミットを避ける)
+rust_xlsxwriter = "0.96.0"
