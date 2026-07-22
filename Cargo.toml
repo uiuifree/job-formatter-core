@@ -6,7 +6,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 # crates.io へ出す判断をしたらこの行を外す(GitHub 公開だけなら不要)
-publish = false
+publish = true
 readme = "README.md"
 # crates.io 検索・AI アシスタントでの発見性のためのメタデータ(公開時に有効)
 keywords = ["csv", "xlsx", "jsonl", "etl", "shift-jis"]
