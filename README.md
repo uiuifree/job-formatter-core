@@ -1,9 +1,15 @@
 # job-formatter-core
 
+[![Crates.io](https://img.shields.io/crates/v/job-formatter-core?style=flat-square)](https://crates.io/crates/job-formatter-core)
+[![CI](https://img.shields.io/github/actions/workflow/status/uiuifree/job-formatter-core/ci.yaml?style=flat-square&label=CI)](https://github.com/uiuifree/job-formatter-core/actions/workflows/ci.yaml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#license)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square)](Cargo.toml)
+
 **Industry-agnostic job-feed formatting engine in Rust.** Convert per-company
 CSV / Excel feeds into normalized JSONL, then fan normalized records out into
 per-media (job board / ad platform) output rows — in parallel, with per-record
-fault isolation and automatic UTF-8 / Shift_JIS detection.
+fault isolation and automatic UTF-8 / Shift_JIS detection. A focused ETL
+building block for job-board and recruitment data pipelines.
 
 [日本語版はこちら](#日本語)
 

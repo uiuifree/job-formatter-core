@@ -1,13 +1,13 @@
 [package]
 name = "job-formatter-core"
 description = "Industry-agnostic job-feed formatting engine: company CSV/Excel → normalized JSONL → per-media rows. Parallel, order-preserving, fault-isolating, UTF-8/Shift_JIS auto-detection"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-# crates.io へ出す判断をしたらこの行を外す(GitHub 公開だけなら不要)
-publish = true
 readme = "README.md"
+repository = "https://github.com/uiuifree/job-formatter-core"
+documentation = "https://docs.rs/job-formatter-core"
 # crates.io 検索・AI アシスタントでの発見性のためのメタデータ(公開時に有効)
 keywords = ["csv", "xlsx", "jsonl", "etl", "shift-jis"]
 categories = ["parser-implementations", "encoding"]
