@@ -21,8 +21,9 @@ pub enum ConvertError {
         /// 対象パス。
         path: String,
     },
-    /// ヘッダー行が読み取れない(存在しない場合を含む)。
-    #[error("ヘッダーの読み取りに失敗: {path}: {reason}")]
+    /// 入力の構造が読み取れない(CSV / Excel のヘッダー行が無い、JSON の最上位が
+    /// 配列として読めない・JSON として壊れている等)。
+    #[error("入力の構造を読み取れません: {path}: {reason}")]
     Header {
         /// 対象パス。
         path: String,

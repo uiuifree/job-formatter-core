@@ -1,22 +1,28 @@
-//! 表データソースの読み取り(CSV / Excel / 独自ソース)。
+//! 表データソースの読み取り(CSV / Excel / JSON / JSONL / 独自ソース)。
 //!
-//! 標準の読み口として CSV(UTF-8 / `Shift_JIS` 自動判別)と Excel(xlsx、
-//! feature `excel`)を提供する。その他の形式(API レスポンス・固定長など)は
-//! [`TableSource::new`] で組み立てれば、同じ変換ドライバ
-//! (隔離・並列・順序保持)にそのまま載る。
+//! 標準の読み口として CSV(UTF-8 / `Shift_JIS` 自動判別)、Excel(xlsx、
+//! feature `excel`)、JSON(レコードの配列。包まれていれば JSON Pointer で選ぶ。API レスポンスなど)、
+//! JSONL(1 行 = 1 レコードの JSON。クローラの出力など)を提供する(JSON / JSONL は UTF-8 のみ)。その他の形式(固定長など)は [`TableSource::new`] で
+//! 組み立てれば、同じ変換ドライバ(隔離・並列・順序保持)にそのまま載る。
 //! 行単位の問題(列数不一致など)は隔離し、ソース全体の読み取りは止めない。
 
 use crate::error::ConvertError;
 use crate::row::Headers;
 #[cfg(feature = "excel")]
 use calamine::Reader as _;
+use serde_json::value::RawValue;
+
+/// JSON / JSONL ソースの唯一の列名。1 レコード分の JSON テキストがそのまま入る
+/// (アダプタは `row.require(JSON_RECORD_COLUMN)` で受け取り、serde で解釈する)。
+pub const JSON_RECORD_COLUMN: &str = "record";
 
 /// 1 データ行(入力内での原位置つき)。
 #[derive(Debug)]
 pub struct SourceRow {
     /// 入力内での 1 始まりの行位置。Excel ではシートの実行番号、CSV では
     /// csv パーサの記録位置(引用符内改行を跨いでも実位置。ただしレコード
-    /// 直前に空行がある場合はその空行区間の先頭を指すことがある)。
+    /// 直前に空行がある場合はその空行区間の先頭を指すことがある)、JSONL では
+    /// 物理行番号(空行も数える)、JSON では配列の要素番号。
     /// [`TableSource::new`] の独自ソースでは 2 始まりの序数。
     pub line: usize,
     /// セル値(ヘッダーと同数)。行単位で壊れている場合は理由文字列。
@@ -169,6 +175,267 @@ fn csv_line(position: Option<&csv::Position>) -> usize {
     position.map_or(0, |position| {
         usize::try_from(position.line()).unwrap_or(usize::MAX)
     })
+}
+
+impl TableSource {
+    /// JSONL(1 行 = 1 レコードの JSON)のファイルから読み取る。
+    ///
+    /// 表としては [`JSON_RECORD_COLUMN`] 列ただ 1 つに JSON テキストをそのまま入れる。
+    /// 項目の取り出し(ネストの解釈・型)はアダプタが serde で行う(列に平坦化すると
+    /// 配列やネストの扱いが業界・媒体ごとに変わるため、core では触らない)。
+    /// 行位置はファイルの物理行番号(1 始まり。空行も数える)。
+    /// 分割納品(`*_1.jsonl`、`*_2.jsonl` …)はファイルごとに読み、
+    /// [`crate::adapter::ConvertOutcome`] を呼び出し側で連結する。隔離レコードの
+    /// `line:{n}` にファイル名は入らないので、連結するときは呼び出し側がパスを添える
+    /// (ディレクトリごと連結して通し番号にすると、どのファイルの何行目か分からなくなる)。
+    /// 行の規則は [`TableSource::from_jsonl_str`] を参照。
+    ///
+    /// # Errors
+    ///
+    /// 読み込みの問題(UTF-8 でない場合を含む)は [`ConvertError::Io`] を返す。
+    pub fn from_jsonl_path(path: &std::path::Path) -> Result<Self, ConvertError> {
+        let origin = path.display().to_string();
+        let text = std::fs::read_to_string(path).map_err(|source| ConvertError::Io {
+            path: origin.clone(),
+            source,
+        })?;
+        Ok(Self::from_jsonl_str(&text, &origin))
+    }
+
+    /// JSONL のテキストから読み取る(`origin` はエラーメッセージ用のソース名)。
+    ///
+    /// - 先頭の UTF-8 BOM は読み飛ばす(CSV 経路と同じ扱い。残すと 1 行目の JSON が壊れる)
+    /// - 空行(空白だけの行を含む)は読み飛ばす。改行は LF / CRLF どちらでもよい
+    /// - 各行は JSON として検証せず、そのままアダプタへ渡す。壊れた行はアダプタの
+    ///   serde が失敗した時点で隔離される(core とアダプタで二重に解析しない)
+    /// - 空の入力(0 行)は空のソース(JSONL にはヘッダーが無いため
+    ///   「壊れている」とは言えない)
+    /// - [`crate::row::Row::raw_payload`] は `{"record": "<JSON テキスト>"}` の形になる
+    ///   (行の原文が文字列として入る二重エンコード。原文の保持には使える)。
+    ///   監査用に JSON の値として持ちたいなら、アダプタが serde で読んだ値を持つこと
+    #[must_use]
+    pub fn from_jsonl_str(text: &str, origin: &str) -> Self {
+        let rows = text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(text)
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(|(index, line)| SourceRow {
+                line: index + 1,
+                cells: Ok(vec![line.to_string()]),
+            })
+            .collect();
+        Self::build(origin.to_string(), json_headers(), rows)
+    }
+
+    /// JSON ファイル(要素 1 つ = 1 レコードの配列を含む)から読み取る。
+    ///
+    /// 表の形と解釈の分担は [`TableSource::from_jsonl_path`] と同じ(`record` 列 1 つに
+    /// 要素の原文を載せ、項目の取り出しはアダプタの serde)。
+    /// `records_pointer` は「文書のどこがレコードの配列か」を JSON Pointer(RFC 6901)で
+    /// 指す。`None`(または `Some("")`)なら最上位が配列。
+    /// Excel の `sheet` 引数(ブックのどのシートが表か)と同じ位置づけ。
+    /// 行位置は選んだ配列の要素番号(1 始まり)。JSON には行の構造が無い(1 行に詰めた
+    /// ファイルもある)ので物理行番号は使わない。
+    /// 規則は [`TableSource::from_json_str`] を参照。
+    ///
+    /// # Errors
+    ///
+    /// 読み込みの問題(UTF-8 でない場合を含む)は [`ConvertError::Io`]、
+    /// JSON として壊れている・pointer が不正・指した先が配列でない場合は
+    /// [`ConvertError::Header`] を返す。
+    pub fn from_json_path(
+        path: &std::path::Path,
+        records_pointer: Option<&str>,
+    ) -> Result<Self, ConvertError> {
+        let origin = path.display().to_string();
+        let text = std::fs::read_to_string(path).map_err(|source| ConvertError::Io {
+            path: origin.clone(),
+            source,
+        })?;
+        Self::from_json_str(&text, &origin, records_pointer)
+    }
+
+    /// JSON のテキストから読み取る(`origin` はエラーメッセージ用のソース名、
+    /// `records_pointer` はレコードの配列を指す JSON Pointer。`None` なら最上位)。
+    ///
+    /// - 先頭の UTF-8 BOM は読み飛ばす
+    /// - JSON Pointer は RFC 6901 どおり: 空文字列が最上位、`/items` `/result/items` で
+    ///   キーを辿り、`/groups/0/items` のように配列の添字(0 始まり)も通る。キー中の
+    ///   `~` と `/` は `~0` `~1` で書く。`/` で始まらない文字列は不正
+    /// - 同じオブジェクトに同名キーが重複していれば後のものを採る(`serde_json` と同じ)
+    /// - 選んだ配列の各要素は原文のまま(再シリアライズせず)アダプタへ渡す。要素が
+    ///   オブジェクトかどうかは検査しない(アダプタの型で決まり、合わない要素は serde の
+    ///   失敗として隔離される)
+    /// - 空の配列(`[]`)は空のソース。指した先が無い・`null` は 0 件にせず致命エラー
+    /// - JSON として壊れている場合は要素の境界が決められず、pointer が不正・指した先が
+    ///   配列でない場合は入力契約の対象外なので、どれも致命エラー(ヘッダーが読めない
+    ///   CSV と同じ扱い。正常な要素があっても部分成功にはしない)
+    /// - 1 回の読み取りで選ぶ配列は 1 つ。複数の配列の結合や親のメタデータの取り込みは
+    ///   呼び出し側で行う
+    /// - [`crate::row::Row::raw_payload`] の形は JSONL と同じ(`{"record": "<原文>"}`)
+    ///
+    /// # Errors
+    ///
+    /// JSON として壊れている・pointer が不正・指した先が配列でない場合は
+    /// [`ConvertError::Header`] を返す(理由に pointer と失敗した位置を含む)。
+    pub fn from_json_str(
+        text: &str,
+        origin: &str,
+        records_pointer: Option<&str>,
+    ) -> Result<Self, ConvertError> {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let header = |reason: String| ConvertError::Header {
+            path: origin.to_string(),
+            reason,
+        };
+        // 文書全体を 1 回走査して構文を確定する(以降の部分解析は型の判定にだけ使う)
+        let root: &RawValue = serde_json::from_str(text)
+            .map_err(|error| header(format!("JSON として読めません: {error}")))?;
+        let elements = select_records(root, records_pointer.unwrap_or("")).map_err(header)?;
+        let rows = elements
+            .iter()
+            .enumerate()
+            .map(|(index, element)| SourceRow {
+                line: index + 1,
+                cells: Ok(vec![element.get().to_string()]),
+            })
+            .collect();
+        Ok(Self::build(origin.to_string(), json_headers(), rows))
+    }
+}
+
+/// JSON / JSONL ソースのヘッダー([`JSON_RECORD_COLUMN`] 列ただ 1 つ)。
+fn json_headers() -> Headers {
+    Headers::new(vec![JSON_RECORD_COLUMN.to_string()])
+}
+
+/// JSON Pointer で文書内のレコード配列を選び、要素を原文のまま返す。
+/// 各段はオブジェクト(キー)か配列(添字)として部分的に読み進める。
+fn select_records<'a>(root: &'a RawValue, pointer: &str) -> Result<Vec<&'a RawValue>, String> {
+    let tokens = pointer_tokens(pointer)?;
+    let mut current = root;
+    let mut walked = String::new();
+    for (raw, key) in tokens {
+        current = select_member(current, &key, raw, &walked, pointer)?;
+        walked.push('/');
+        walked.push_str(raw);
+    }
+    serde_json::from_str(current.get()).map_err(|_| {
+        format!(
+            "JSON Pointer {} の参照先は配列ではありません(先頭: {})",
+            location(pointer),
+            head(current.get())
+        )
+    })
+}
+
+/// 1 段ぶん辿る。`current` がオブジェクトならキー、配列なら添字として `key` を解釈する。
+fn select_member<'a>(
+    current: &'a RawValue,
+    key: &str,
+    raw: &str,
+    walked: &str,
+    pointer: &str,
+) -> Result<&'a RawValue, String> {
+    let fail = |detail: String| format!("JSON Pointer \"{pointer}\" を解決できません: {detail}");
+    let object: Option<std::collections::HashMap<String, &'a RawValue>> =
+        serde_json::from_str(current.get()).ok();
+    if let Some(mut members) = object {
+        return members.remove(key).ok_or_else(|| {
+            fail(format!(
+                "{} にキー \"{key}\" がありません",
+                location(walked)
+            ))
+        });
+    }
+    let array: Option<Vec<&'a RawValue>> = serde_json::from_str(current.get()).ok();
+    if let Some(items) = array {
+        let index = array_index(key).ok_or_else(|| {
+            fail(format!(
+                "{} は配列なので添字が要ります(\"{raw}\" は添字として不正)",
+                location(walked)
+            ))
+        })?;
+        return items.get(index).copied().ok_or_else(|| {
+            fail(format!(
+                "{} の添字 {index} は範囲外です(要素数 {})",
+                location(walked),
+                items.len()
+            ))
+        });
+    }
+    Err(fail(format!(
+        "{} は object でも配列でもないため次を参照できません(先頭: {})",
+        location(walked),
+        head(current.get())
+    )))
+}
+
+/// JSON Pointer を参照トークンの列(原文, エスケープ解除後)にする。空文字列は最上位。
+fn pointer_tokens(pointer: &str) -> Result<Vec<(&str, String)>, String> {
+    let Some(body) = pointer.strip_prefix('/') else {
+        if pointer.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "JSON Pointer \"{pointer}\" が不正です: 空文字列か \"/\" で始まる文字列を指定してください"
+        ));
+    };
+    body.split('/')
+        .map(|raw| {
+            let key = unescape_token(raw).ok_or_else(|| {
+                format!("JSON Pointer \"{pointer}\" が不正です: \"~\" の後は 0 か 1 だけです")
+            })?;
+            Ok((raw, key))
+        })
+        .collect()
+}
+
+/// 参照トークンのエスケープ(`~1` → `/`、`~0` → `~`)を解く。他の `~` は不正。
+fn unescape_token(raw: &str) -> Option<String> {
+    let mut key = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '~' {
+            key.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => key.push('~'),
+            Some('1') => key.push('/'),
+            _ => return None,
+        }
+    }
+    Some(key)
+}
+
+/// 配列の添字として解釈する(RFC 6901: `0` か、先頭が 1〜9 の数字列。`-` や先頭 0 は不正)。
+fn array_index(key: &str) -> Option<usize> {
+    let well_formed = key == "0"
+        || (key.starts_with(|ch: char| ('1'..='9').contains(&ch))
+            && key.bytes().all(|byte| byte.is_ascii_digit()));
+    well_formed.then(|| key.parse().ok()).flatten()
+}
+
+/// エラーメッセージ用の位置表記(pointer を引用符つきで示す。空なら最上位)。
+fn location(walked: &str) -> String {
+    if walked.is_empty() {
+        "\"\"(最上位)".to_string()
+    } else {
+        format!("\"{walked}\"")
+    }
+}
+
+/// エラーメッセージ用に値の先頭だけを示す。
+fn head(text: &str) -> String {
+    const LIMIT: usize = 24;
+    let mut shown: String = text.chars().take(LIMIT).collect();
+    if text.chars().count() > LIMIT {
+        shown.push('…');
+    }
+    shown
 }
 
 #[cfg(feature = "excel")]
@@ -481,6 +748,195 @@ mod tests {
             source.rows()[3].cells.as_ref().unwrap_err(),
             "upstream error"
         );
+    }
+
+    #[test]
+    fn jsonl_str_skips_blank_lines_and_keeps_physical_line_numbers() {
+        // 先頭の BOM は落とす。末尾改行なし。前後空白・ネスト・エスケープはそのまま載せる
+        let text = "\u{feff}{\"id\":\"J1\"}\n\n  \r\n{broken\r\n {\"a\":{\"b\":\"x\\ny\"}} ";
+        let source = TableSource::from_jsonl_str(text, "mem.jsonl");
+        assert_eq!(source.origin(), "mem.jsonl");
+        assert_eq!(source.headers().columns(), [JSON_RECORD_COLUMN]);
+        // 行位置は物理行番号(空行も数える)。壊れた JSON はここでは検証しない
+        let lines: Vec<(usize, &str)> = source
+            .rows()
+            .iter()
+            .map(|row| (row.line, row.cells.as_ref().unwrap()[0].as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (1, "{\"id\":\"J1\"}"),
+                (4, "{broken"),
+                (5, " {\"a\":{\"b\":\"x\\ny\"}} ")
+            ]
+        );
+        // 空の入力は空のソース(JSONL にはヘッダーが無いためエラーにしない)
+        assert!(
+            TableSource::from_jsonl_str("", "empty.jsonl")
+                .rows()
+                .is_empty()
+        );
+        assert!(
+            TableSource::from_jsonl_str("\n  \n", "blank.jsonl")
+                .rows()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn json_str_takes_array_elements_as_raw_text_with_ordinal_positions() {
+        // 先頭の BOM は落とす。要素はネスト・空白・エスケープを含めて原文のまま、位置は要素番号
+        let text = "\u{feff}[\n  {\"id\": \"J1\", \"tags\": [\"a\", \"b\"]},\n  \"x\\ny\",\n\n  {\"id\":\"J2\"}\n]\n";
+        let source = TableSource::from_json_str(text, "mem.json", None).unwrap();
+        assert_eq!(source.origin(), "mem.json");
+        assert_eq!(source.headers().columns(), [JSON_RECORD_COLUMN]);
+        assert_eq!(
+            cells_with_positions(&source),
+            [
+                (1, "{\"id\": \"J1\", \"tags\": [\"a\", \"b\"]}".to_string()),
+                (2, "\"x\\ny\"".to_string()),
+                (3, "{\"id\":\"J2\"}".to_string())
+            ]
+        );
+        // 空の配列は空のソース。Some("") は None と同じ(最上位)
+        assert!(
+            TableSource::from_json_str("[]", "empty.json", Some(""))
+                .unwrap()
+                .rows()
+                .is_empty()
+        );
+        // 監査用 JSON は外側の record 列に原文を文字列で持つ(要素内の "record" キーとは衝突しない)
+        let text = "[{\"record\": \"a,b\", \"note\": \"x\\ny\"}]";
+        let source = TableSource::from_json_str(text, "mem.json", None).unwrap();
+        let cells = source.rows()[0].cells.as_ref().unwrap();
+        let row = crate::row::Row::new(source.headers(), cells, source.rows()[0].line);
+        assert_eq!(
+            row.raw_payload(),
+            serde_json::json!({ "record": "{\"record\": \"a,b\", \"note\": \"x\\ny\"}" })
+        );
+    }
+
+    fn cells_with_positions(source: &TableSource) -> Vec<(usize, String)> {
+        source
+            .rows()
+            .iter()
+            .map(|row| (row.line, row.cells.as_ref().unwrap()[0].clone()))
+            .collect()
+    }
+
+    #[test]
+    fn json_pointer_selects_the_records_array_inside_the_document() {
+        let text = r#"{
+            "meta": {"page": 1, "items": ["not this"]},
+            "items": [{"id": "A"}, {"id": "B"}],
+            "result": {"items": [{"id": "C"}]},
+            "groups": [{"items": [{"id": "D"}]}, {"items": [{"id": "E"}, {"id": "F"}]}],
+            "a/b": {"~data": [{"id": "G"}]},
+            "": [{"id": "H"}],
+            "dup": [{"id": "old"}], "dup": [{"id": "new"}]
+        }"#;
+        let select = |pointer: &str| {
+            cells_with_positions(
+                &TableSource::from_json_str(text, "mem.json", Some(pointer)).unwrap(),
+            )
+        };
+        // 位置は選んだ配列の中の要素番号(1 始まり)
+        assert_eq!(
+            select("/items"),
+            [
+                (1, "{\"id\": \"A\"}".to_string()),
+                (2, "{\"id\": \"B\"}".to_string())
+            ]
+        );
+        assert_eq!(
+            select("/result/items"),
+            [(1, "{\"id\": \"C\"}".to_string())]
+        );
+        // 配列の添字(0 始まり)を経由できる
+        assert_eq!(
+            select("/groups/1/items"),
+            [
+                (1, "{\"id\": \"E\"}".to_string()),
+                (2, "{\"id\": \"F\"}".to_string())
+            ]
+        );
+        // ~1 → "/"、~0 → "~"。"/" は空文字列キー
+        assert_eq!(select("/a~1b/~0data"), [(1, "{\"id\": \"G\"}".to_string())]);
+        assert_eq!(select("/"), [(1, "{\"id\": \"H\"}".to_string())]);
+        // 同名キーの重複は後勝ち(serde_json と同じ)
+        assert_eq!(select("/dup"), [(1, "{\"id\": \"new\"}".to_string())]);
+    }
+
+    #[test]
+    fn json_structure_and_pointer_problems_are_header_errors() {
+        let doc = r#"{"items": [{"id":"J1"}], "result": null, "groups": [[1], [2]], "n": 5}"#;
+        // (入力, pointer, 理由に含まれる文言)
+        let cases = [
+            // 文書の構文: 途中で壊れている(正常な要素があっても部分成功にしない)・後ろに続きがある・空
+            ("[{\"id\":\"J1\"},{\"id\":}]", None, "JSON として読めません"),
+            ("[] {}", None, "JSON として読めません"),
+            ("", None, "JSON として読めません"),
+            // 指した先が配列でない
+            (
+                doc,
+                None,
+                "JSON Pointer \"\"(最上位) の参照先は配列ではありません(先頭: {\"items\": [{\"id\":\"J1\"}],…)",
+            ),
+            (
+                doc,
+                Some("/n"),
+                "JSON Pointer \"/n\" の参照先は配列ではありません(先頭: 5)",
+            ),
+            // pointer の構文
+            (
+                doc,
+                Some("items"),
+                "\"items\" が不正です: 空文字列か \"/\" で始まる",
+            ),
+            (
+                doc,
+                Some("/a~2"),
+                "\"/a~2\" が不正です: \"~\" の後は 0 か 1 だけです",
+            ),
+            (doc, Some("/a~"), "\"/a~\" が不正です"),
+            // 解決の失敗(位置つき)。欠落や null は 0 件にしない
+            (
+                doc,
+                Some("/missing"),
+                "\"\"(最上位) にキー \"missing\" がありません",
+            ),
+            (
+                doc,
+                Some("/result/items"),
+                "\"/result\" は object でも配列でもないため次を参照できません(先頭: null)",
+            ),
+            (
+                doc,
+                Some("/groups/2"),
+                "\"/groups\" の添字 2 は範囲外です(要素数 2)",
+            ),
+            (
+                doc,
+                Some("/groups/x"),
+                "\"/groups\" は配列なので添字が要ります(\"x\" は添字として不正)",
+            ),
+            (doc, Some("/groups/01"), "(\"01\" は添字として不正)"),
+            (doc, Some("/groups/-"), "(\"-\" は添字として不正)"),
+            (
+                doc,
+                Some("/groups/99999999999999999999999"),
+                "は添字として不正",
+            ),
+        ];
+        for (text, pointer, expected) in cases {
+            let err = TableSource::from_json_str(text, "bad.json", pointer).unwrap_err();
+            assert!(
+                matches!(err, ConvertError::Header { .. }),
+                "{pointer:?}: {err}"
+            );
+            assert!(err.to_string().contains(expected), "{pointer:?}: {err}");
+        }
     }
 }
 

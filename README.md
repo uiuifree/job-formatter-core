@@ -6,7 +6,7 @@
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square)](Cargo.toml)
 
 **Industry-agnostic job-feed formatting engine in Rust.** Convert per-company
-CSV / Excel feeds into normalized JSONL, then fan normalized records out into
+CSV / Excel / JSON / JSONL feeds into normalized JSONL, then fan normalized records out into
 per-media (job board / ad platform) output rows — in parallel, with per-record
 fault isolation and automatic UTF-8 / Shift_JIS detection. A focused ETL
 building block for job-board and recruitment data pipelines.
@@ -14,9 +14,9 @@ building block for job-board and recruitment data pipelines.
 [日本語版はこちら](#日本語)
 
 ```text
-Company A CSV ─┐                         ┌─→ rows for Media X
-Company B CSV ─┼─→ normalized JSONL hub ─┼─→ rows for Media Y
-Company C CSV ─┘                         └─→ rows for Media Z
+Company A CSV  ─┐                         ┌─→ rows for Media X
+Company B xlsx ─┼─→ normalized JSONL hub ─┼─→ rows for Media Y
+Company C JSON ─┘                         └─→ rows for Media Z
 ```
 
 Instead of maintaining N×M converters (N companies × M media), you implement
@@ -29,12 +29,17 @@ domain crates and their media implementations.
 
 - **Generic over your record type** — core has zero industry or media
   knowledge; bring your own serde types
-- **CSV and Excel (xlsx) ingestion built in** — CSV with encoding
+- **CSV, Excel (xlsx), JSON and JSONL ingestion built in** — CSV with encoding
   auto-detection (UTF-8 first, then Shift_JIS, common in Japanese data feeds);
   Excel behind the default-on `excel` cargo feature, with documented
-  industry-neutral cell-to-string rules (dates become ISO 8601)
-- **Custom sources without ceremony** — any other format (JSON API, fixed
-  width, …) plugs into the same isolation/parallel driver by building a
+  industry-neutral cell-to-string rules (dates become ISO 8601); JSON (an
+  array of records, top-level or selected inside a wrapper object by JSON
+  Pointer, e.g. an API response) and JSONL (one JSON per line, e.g. crawler
+  output), both UTF-8 only, each record handed to your adapter as raw
+  text for serde to interpret — quarantined records point at the array index
+  (JSON) or the physical line number (JSONL)
+- **Custom sources without ceremony** — any other format (fixed width, …)
+  plugs into the same isolation/parallel driver by building a
   `TableSource` from plain headers + rows
 - **Record-level error isolation** — a broken row is quarantined with its
   reason and the batch continues; only fatal problems (unreadable file,
@@ -51,7 +56,7 @@ domain crates and their media implementations.
 
 ```text
 Ingestion
-  CSV / Excel / custom rows
+  CSV / Excel / JSON / JSONL / custom rows
        │  TableSource (headers + rows)
        ▼
   convert_source(adapter)      parallel per record · order preserved
@@ -66,8 +71,9 @@ Media formatting
        └─▶ errors       quarantined
 ```
 
-Only file I/O is sequential; conversion, formatting, and serialization all run
-on rayon while output order stays deterministic. A fatal problem (unreadable
+Only reading the input (CSV parsing, JSON scanning) and writing the output are
+sequential; conversion, formatting, and serialization all run on rayon while
+output order stays deterministic. A fatal problem (unreadable
 file, missing required column) aborts the source; anything record-level is
 quarantined into `errors` with its reason.
 
@@ -115,6 +121,12 @@ impl CompanyAdapter for MyAgentAdapter {
 let outcome = convert_csv_path(&MyAgentAdapter, std::path::Path::new("feed.csv"))?;
 // Excel feed?  convert_xlsx_path(&MyAgentAdapter, path, None)      — first visible sheet
 //              convert_xlsx_path(&MyAgentAdapter, path, Some("求人")) — named sheet
+// JSON feed?   convert_json_path(&MyJsonAdapter, path, None)        — top-level array, one file per call
+//              convert_json_path(&MyJsonAdapter, path, Some("/result/items")) — array inside a
+//              wrapper object, selected by JSON Pointer (RFC 6901)
+// JSONL feed?  convert_jsonl_path(&MyJsonAdapter, path)             — one JSON per line, one file per call
+//              Both need a different adapter: required_columns() = &[JSON_RECORD_COLUMN], and
+//              convert() parses row.require(JSON_RECORD_COLUMN) with serde (see tests/convert.rs)
 // Custom feed? build a TableSource::new(origin, headers, rows) and use convert_source
 // outcome.records: converted records, input order preserved
 // outcome.errors:  quarantined records with reasons — the batch never dies
@@ -168,9 +180,9 @@ Complete runnable examples live in the crate documentation (doctests in
 
 | Module | What it provides |
 |---|---|
-| `adapter` | `CompanyAdapter` trait + parallel conversion driver (`convert_csv_path` / `convert_source`) |
+| `adapter` | `CompanyAdapter` trait + parallel conversion driver (`convert_csv_path` / `convert_json_path` / `convert_jsonl_path` / `convert_source`) |
 | `media` | `MediaFormatter` trait + parallel formatting driver (`format_records`), 1 record → 0..n rows |
-| `source` | `TableSource`: CSV / Excel readers + constructor for custom sources, per-row isolation |
+| `source` | `TableSource`: CSV / Excel / JSON / JSONL readers + constructor for custom sources, per-row isolation |
 | `row` | Column access by name: `require` / `optional` / `list` / `raw_payload` |
 | `output` | `write_jsonl`: parallel serialization, ordered writes |
 | `error` | `ConvertError` (fatal, per source) / `RecordError` (isolated, per record) / `OutputError` |
@@ -193,13 +205,13 @@ Complete runnable examples live in the crate documentation (doctests in
 
 ## 日本語
 
-求人フィード連携の**業界非依存基盤**です。「各社 CSV → 正規形(JSONL)」の取り込みと、
+求人フィード連携の**業界非依存基盤**です。「各社のフィード(CSV / Excel / JSON / JSONL)→ 正規形(JSONL)」の取り込みと、
 その双対である「正規形 → 媒体別出力行」の整形、それぞれの**仕組み**を提供します。
 
 ```text
-会社A CSV ─┐                          ┌─→ 媒体X向け出力行
-会社B CSV ─┼─→ 正規形レコード(JSONL)─┼─→ 媒体Y向け出力行
-会社C CSV ─┘                          └─→ 媒体Z向け出力行
+会社A CSV  ─┐                          ┌─→ 媒体X向け出力行
+会社B xlsx ─┼─→ 正規形レコード(JSONL)─┼─→ 媒体Y向け出力行
+会社C JSON ─┘                          └─→ 媒体Z向け出力行
 ```
 
 N 社 × M 媒体の直接変換(N×M 実装)を避け、正規形ハブを挟んで
@@ -211,10 +223,14 @@ core が持つのは**仕組みのみ**で、レコード型・業務知識(マ�
 ### 特徴
 
 - **レコード型にジェネリック**: core は業界知識・媒体知識を一切持たない
-- **CSV / Excel(xlsx)を標準サポート**: CSV は UTF-8 → Shift_JIS の順で
+- **CSV / Excel(xlsx)/ JSON / JSONL を標準サポート**: CSV は UTF-8 → Shift_JIS の順で
   文字コード自動判別。Excel は既定有効の cargo feature `excel`(シート指定可、
-  セルの文字列化規則は業界非依存で明文化。日付は ISO 8601)
-- **独自ソースも同じ流れに**: その他の形式(API・固定長など)は
+  セルの文字列化規則は業界非依存で明文化。日付は ISO 8601)。JSON(レコードの配列。
+  最上位でも、`{"result": {"items": [...]}}` のように包まれていても JSON Pointer で選べる。
+  API レスポンスなど)と JSONL(1 行 = 1 レコード。クローラ出力など)は UTF-8 のみで、レコードの
+  原文をそのままアダプタへ渡して serde で解釈する。隔離レコードは JSON では配列の要素番号、
+  JSONL ではファイルの物理行番号で指す(分割納品はファイルごとに呼ぶ)
+- **独自ソースも同じ流れに**: その他の形式(固定長など)は
   `TableSource::new` で組み立てれば、隔離・並列・順序保持のドライバにそのまま載る
 - **レコード単位のエラー隔離**: 壊れた行は理由つきで隔離して継続。
   ソース全体を止めるのは読込・文字コード・必須列欠落などの致命問題のみ
@@ -225,8 +241,12 @@ core が持つのは**仕組みのみ**で、レコード型・業務知識(マ�
 ### 使い方
 
 上の Quick start のとおり、取り込み側は `CompanyAdapter` を実装して
-`convert_csv_path` → `write_jsonl`、媒体側は `MediaFormatter` を実装して
-`format_records` を呼びます。実行可能な完全例は API ドキュメント
+`convert_csv_path`(Excel は `convert_xlsx_path`、JSON は `convert_json_path`、
+JSONL は `convert_jsonl_path`)→ `write_jsonl`、媒体側は `MediaFormatter` を実装して
+`format_records` を呼びます。JSON / JSONL は列が `record` 1 つの表として渡るので、
+それを serde で読むアダプタを書きます(`tests/convert.rs` の `JsonAdapter` が例)。
+包まれた配列(`{"result": {"items": [...]}}`)は `convert_json_path` の第 3 引数に
+JSON Pointer(`Some("/result/items")`)を渡して選びます。実行可能な完全例は API ドキュメント
 (`src/lib.rs` の doctest)を参照してください。
 
 ### 開発

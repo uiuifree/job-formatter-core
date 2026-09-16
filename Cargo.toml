@@ -1,7 +1,7 @@
 [package]
 name = "job-formatter-core"
-description = "Industry-agnostic job-feed formatting engine: company CSV/Excel → normalized JSONL → per-media rows. Parallel, order-preserving, fault-isolating, UTF-8/Shift_JIS auto-detection"
-version = "0.1.1"
+description = "Industry-agnostic job-feed formatting engine: company CSV/Excel/JSON/JSONL → normalized JSONL → per-media rows. Parallel, order-preserving, fault-isolating, UTF-8/Shift_JIS auto-detection"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -15,8 +15,9 @@ categories = ["parser-implementations", "encoding"]
 [dependencies]
 # レコード型の直列化契約(ドメイン側が derive で実装する前提の中核 API)
 serde = { version = "1", features = ["derive"] }
-# JSONL 行の生成と raw_payload の監査用 JSON 表現
-serde_json = "1"
+# JSONL 行の生成と raw_payload の監査用 JSON 表現。raw_value は JSON 入力の配列要素を
+# 再シリアライズせず原文のまま切り出すため
+serde_json = { version = "1", features = ["raw_value"] }
 # ステージ別エラー型(ConvertError / RecordError / OutputError)の定義
 thiserror = "2"
 # CSV 解析(RFC4180 準拠の実績ある実装)

@@ -90,7 +90,7 @@ impl<'a> Row<'a> {
         }
     }
 
-    /// 入力内での行位置(1 始まり)。CSV / Excel では物理行番号。
+    /// 入力内での行位置(1 始まり)。CSV / Excel / JSONL では物理行番号、JSON では配列の要素番号。
     #[must_use]
     pub fn line(&self) -> usize {
         self.line
@@ -157,6 +157,8 @@ impl<'a> Row<'a> {
     ///
     /// 監査用に値は生のまま(trim なし)保持する。重複列は最初の列を採用し
     /// (`require` と同じ規約)、値が欠けている列は `null` になる。
+    /// JSON / JSONL ソースでは `record` 列にレコードの原文が文字列として入る(二重エンコード)。
+    /// 原文の保持にはこれでよく、JSON の値として持ちたいならアダプタが serde で読んだ値を持つこと。
     #[must_use]
     pub fn raw_payload(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();

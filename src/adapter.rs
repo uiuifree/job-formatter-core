@@ -88,6 +88,42 @@ pub fn convert_csv_path<A: CompanyAdapter + ?Sized>(
     convert_source(adapter, &source)
 }
 
+/// JSONL ファイル(1 行 = 1 レコードの JSON)を読み取り、アダプタで変換する。
+/// アダプタは [`crate::source::JSON_RECORD_COLUMN`] 列の JSON テキストを serde で解釈する。
+/// 隔離レコードの `line:{n}` はファイルの物理行番号。分割納品はファイルごとに呼び、
+/// 結果を呼び出し側で連結する。
+///
+/// # Errors
+///
+/// 読み込み(UTF-8 でない場合を含む)・必須列の問題は [`ConvertError`] を返す。
+pub fn convert_jsonl_path<A: CompanyAdapter + ?Sized>(
+    adapter: &A,
+    path: &std::path::Path,
+) -> Result<ConvertOutcome<A::Record>, ConvertError> {
+    let source = TableSource::from_jsonl_path(path)?;
+    convert_source(adapter, &source)
+}
+
+/// JSON ファイル(要素 1 つ = 1 レコードの配列を含む)を読み取り、アダプタで変換する。
+/// `records_pointer` はレコードの配列を指す JSON Pointer(`None` なら最上位が配列。
+/// `Some("/items")` `Some("/result/items")` のように包まれた配列を選べる)。
+/// アダプタは [`crate::source::JSON_RECORD_COLUMN`] 列の JSON テキストを serde で解釈する。
+/// 隔離レコードの `line:{n}` は選んだ配列の要素番号(1 始まり)。
+///
+/// # Errors
+///
+/// 読み込み(UTF-8 でない場合を含む)・JSON として壊れている・pointer が不正・指した先が
+/// 配列でない・必須列の問題は [`ConvertError`] を返す(JSON 全体の構文不正は致命、
+/// 要素の型不一致は隔離)。
+pub fn convert_json_path<A: CompanyAdapter + ?Sized>(
+    adapter: &A,
+    path: &std::path::Path,
+    records_pointer: Option<&str>,
+) -> Result<ConvertOutcome<A::Record>, ConvertError> {
+    let source = TableSource::from_json_path(path, records_pointer)?;
+    convert_source(adapter, &source)
+}
+
 /// Excel(xlsx)ファイルを読み取り、アダプタで変換する
 /// (`sheet` が `None` なら最初の可視シート)。
 ///

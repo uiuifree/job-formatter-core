@@ -1,9 +1,9 @@
 //! # job-formatter-core
 //!
-//! *Industry-agnostic job-feed formatting engine: company CSV → normalized
-//! JSONL → per-media output rows. Parallel, order-preserving, fault-isolating.*
+//! *Industry-agnostic job-feed formatting engine: company CSV / Excel / JSON / JSONL
+//! → normalized JSONL → per-media output rows. Parallel, order-preserving, fault-isolating.*
 //!
-//! 求人フィード連携の**業界非依存基盤**。「各社 CSV → 正規形(JSONL)」の取り込みと、
+//! 求人フィード連携の**業界非依存基盤**。「各社のフィード(CSV / Excel / JSON / JSONL)→ 正規形(JSONL)」の取り込みと、
 //! その双対である「正規形 → 媒体別出力行」の整形、それぞれの**仕組み**を担う。
 //!
 //! ```text
@@ -16,6 +16,8 @@
 //!
 //! - **core(本クレート)**: アダプタの枠組み([`adapter::CompanyAdapter`])・
 //!   CSV 読取(UTF-8 / `Shift_JIS` 自動判別)・Excel 読取(feature `excel`、既定で有効)・
+//!   JSON 読取(レコードの配列。包まれていれば JSON Pointer で選ぶ)・
+//!   JSONL 読取(1 行 = 1 レコードの JSON)(いずれも UTF-8 のみ)・
 //!   独自ソースの組み立て口([`source::TableSource::new`])・列名アクセス・
 //!   レコード単位のエラー隔離・並列変換・JSONL 出力・媒体整形の枠組み
 //!   ([`media::MediaFormatter`])。レコード型に対してジェネリックで、
@@ -30,11 +32,11 @@
 //!
 //! 行単位の変換([`adapter::convert_source`])・媒体整形([`media::format_records`])・
 //! シリアライズ([`output::write_jsonl`])は rayon で並列実行し、入力順を保持する。
-//! 直列なのはファイル I/O のみ。
+//! 直列なのは入力の読み取りと構造の解析(CSV のパース・JSON の走査)、出力の書き込みのみ。
 //!
 //! ## 使い方
 //!
-//! ### 取り込み(各社 CSV → 正規形)
+//! ### 取り込み(各社のフィード → 正規形)
 //!
 //! ```
 //! use job_formatter_core::adapter::{CompanyAdapter, convert_source};
@@ -73,7 +75,9 @@
 //! # fn main() -> Result<(), job_formatter_core::error::ConvertError> {
 //! let csv = "求人番号,タイトル\nJ1,スタッフ募集\nJ2,\n";
 //! let source = TableSource::from_csv_bytes(csv.as_bytes(), "agent.csv")?;
-//! // Excel なら TableSource::from_xlsx_path、独自形式なら TableSource::new で同じ流れに載る
+//! // Excel なら TableSource::from_xlsx_path、独自形式なら TableSource::new で同じ流れに載る。
+//! // JSON / JSONL(from_json_path / from_jsonl_path)は列が `record` 1 つなので、
+//! // それを serde で読む別のアダプタが要る(tests/convert.rs の JsonAdapter を参照)
 //! let outcome = convert_source(&MyAgentAdapter, &source)?;
 //! assert_eq!(outcome.records.len(), 1);   // J2 はタイトル空で隔離
 //! assert_eq!(outcome.errors.len(), 1);

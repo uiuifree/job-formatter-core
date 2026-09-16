@@ -1,13 +1,17 @@
 # AGENTS.md — job-formatter-core 開発ガイド(人間・AI エージェント共通)
 
-求人フィード連携の**業界非依存基盤**。「各社 CSV → 正規形(JSONL)」の取り込みと、
+求人フィード連携の**業界非依存基盤**。「各社のフィード(CSV / Excel / JSON / JSONL)→ 正規形(JSONL)」の取り込みと、
 その双対である「正規形 → 媒体別出力行」の整形、それぞれの**仕組み**を担う。
 レコード型に対してジェネリックで、**業界知識・媒体知識を一切持たない**。
 
 ## 責務境界(横展開の設計)
 
 - **core(本リポジトリ)**: `CompanyAdapter` trait / 表データ読取(CSV: UTF-8・Shift_JIS
-  自動判別、Excel: feature `excel` 既定有効、独自形式: `TableSource::new` で組み立て)/
+  自動判別、Excel: feature `excel` 既定有効、JSON(レコードの配列。包まれていれば JSON Pointer で
+  選ぶ)/ JSONL(1 行 = 1 レコード):
+  レコードの原文を `record` 列 1 つの表に載せる(ネストの解釈はアダプタの serde。UTF-8 のみ・
+  1 ソース = 1 ファイル。位置は JSONL が物理行、JSON が要素番号)、
+  独自形式: `TableSource::new` で組み立て)/
   列名アクセス(`Row`)/ レコード単位のエラー隔離 / 並列変換 / JSONL 出力 /
   媒体整形の仕組み(`MediaFormatter` trait + 隔離つき一括整形ドライバ)
 - **ドメインクレート**(job-formatter-kaigo / -kangoshi …): 変換用レコード型・各社アダプタ・CLI。
@@ -21,7 +25,8 @@
 ## 速度(必須要件)
 
 - 10 万件を数分以内。行単位の変換(`convert_source`)とシリアライズ(`write_jsonl`)は
-  rayon で並列、直列なのはファイル I/O のみ。順序は入力どおり保持する
+  rayon で並列、直列なのは入力の読み取りと構造の解析(CSV のパース・JSON の走査)、
+  出力の書き込みのみ。順序は入力どおり保持する
 - 新しい処理を足すときも「行単位で並列化できる形」を保つこと
 
 ## コマンド
@@ -50,7 +55,7 @@ cargo llvm-cov --fail-under-functions 100 --fail-uncovered-lines 2
 |---|---|
 | `src/adapter.rs` | `CompanyAdapter` trait・並列変換ドライバ・`ConvertOutcome` |
 | `src/media.rs` | `MediaFormatter` trait・一括整形ドライバ・`MediaOutcome` |
-| `src/source.rs` | 表データ読取: `TableSource`(CSV / Excel / 独自ソースの組み立て口・行単位エラー隔離) |
+| `src/source.rs` | 表データ読取: `TableSource`(CSV / Excel / JSON / JSONL / 独自ソースの組み立て口・行単位エラー隔離) |
 | `src/row.rs` | 列名アクセス(`require` / `optional` / `list` / `raw_payload`) |
 | `src/output.rs` | JSONL 出力(並列シリアライズ) |
 | `src/error.rs` | `ConvertError`(致命)/ `RecordError`(隔離)/ `OutputError` |
