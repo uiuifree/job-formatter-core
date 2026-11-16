@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/job-formatter-core?style=flat-square)](https://crates.io/crates/job-formatter-core)
 [![CI](https://img.shields.io/github/actions/workflow/status/uiuifree/job-formatter-core/ci.yaml?style=flat-square&label=CI)](https://github.com/uiuifree/job-formatter-core/actions/workflows/ci.yaml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#license)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square)](Cargo.toml)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange?style=flat-square)](Cargo.toml)
 
 **Industry-agnostic job-feed formatting engine in Rust.** Convert per-company
 CSV / Excel / JSON / JSONL feeds into normalized JSONL, then fan normalized records out into
