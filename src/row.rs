@@ -243,7 +243,7 @@ mod tests {
         let data = values(&["J1", "n", " A / B 、/、C ", "x"]);
         let row = Row::new(&headers, &data, 4);
         assert_eq!(row.list("tags", &['/', '、']), vec!["A", "B", "C"]);
-        assert!(row.list("ghost", &['/']).is_empty());
+        assert_eq!(row.list("ghost", &['/']), Vec::<String>::new());
     }
 
     #[test]
