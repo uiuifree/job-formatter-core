@@ -38,6 +38,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings    # pedantic 有効
 cargo doc --no-deps    # rustdoc lint 強制
 cargo machete
+cargo audit    # 脆弱性のある依存の検査(CI は毎週月曜にも実行)
 # 「2」は複数テストバイナリ統合時の LLVM 集計アーティファクト分(実未カバー行はゼロ)
 cargo llvm-cov --fail-under-functions 100 --fail-uncovered-lines 2
 ```
