@@ -8,6 +8,8 @@ on:
   # 依存に新しく見つかった脆弱性を、push が無い週でも拾うため
   schedule:
     - cron: "0 0 * * 1"
+  # release.yml から呼ぶ
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

@@ -1,0 +1,71 @@
+name: Release
+
+# v* タグの push で crates.io に公開し、CHANGELOG の該当の節を本文にした GitHub Release を作る。
+# 公開ジョブは Environment `release` の承認を待ってから走る。
+# 認証は crates.io の Trusted Publishing（OIDC）で、トークンは置かない。
+# ひな形の正: uiuifree/claude-config の skills/oss-release/release.yml
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # 取り消せない公開の前に、版上げ忘れと CHANGELOG の書き忘れを止める
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: タグと Cargo.toml の version が一致すること
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::タグ $GITHUB_REF_NAME と Cargo.toml の version $version が一致しません"
+            exit 1
+          fi
+      - name: CHANGELOG.md にこの版の節があること
+        run: |
+          if ! grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md に ${GITHUB_REF_NAME#v} の節がありません"
+            exit 1
+          fi
+
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
+  publish:
+    needs: [check-version, ci]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: CHANGELOG のこの版の節を本文にして GitHub Release を作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
