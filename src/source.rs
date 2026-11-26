@@ -631,6 +631,7 @@ fn excel_datetime_to_string(value: &calamine::ExcelDateTime) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::row::Row;
 
     const CSV_TEXT: &str = "id,name\nJ1,太郎\nJ2,花子\n";
 
@@ -704,6 +705,21 @@ mod tests {
     }
 
     #[test]
+    fn csv_duplicate_headers_are_numbered_and_keep_physical_lines() {
+        // 同じ名前の列は #2 で区別し、引用符内改行があっても物理行番号を保つ
+        // 行 1=ヘッダー、2-3=J1(引用内改行)、4=J2
+        let text = "id,tag,tag\nJ1,\"a\nb\",c\nJ2,d,e\n";
+        let source = TableSource::from_csv_bytes(text.as_bytes(), "mem.csv").unwrap();
+        assert_eq!(source.headers().columns(), ["id", "tag", "tag#2"]);
+        assert_eq!(source.rows()[0].line, 2);
+        assert_eq!(source.rows()[1].line, 4);
+        let cells = source.rows()[0].cells.as_ref().unwrap();
+        let row = Row::new(source.headers(), cells, source.rows()[0].line);
+        assert_eq!(row.all("tag"), vec!["a\nb", "c"]);
+        assert_eq!(row.require("tag#2").unwrap(), "c");
+    }
+
+    #[test]
     fn unreadable_input_is_a_header_error() {
         struct FailingReader;
         impl std::io::Read for FailingReader {
@@ -748,6 +764,18 @@ mod tests {
             source.rows()[3].cells.as_ref().unwrap_err(),
             "upstream error"
         );
+    }
+
+    #[test]
+    fn custom_source_numbers_duplicate_headers() {
+        let headers = Headers::new(vec!["id".to_string(), "id".to_string()]);
+        let rows = vec![Ok(vec!["J1".to_string(), "J1-2".to_string()])];
+        let source = TableSource::new("api:jobs", headers, rows);
+        assert_eq!(source.headers().columns(), ["id", "id#2"]);
+        assert_eq!(source.rows()[0].line, 2);
+        let cells = source.rows()[0].cells.as_ref().unwrap();
+        let row = Row::new(source.headers(), cells, 2);
+        assert_eq!(row.all("id"), vec!["J1", "J1-2"]);
     }
 
     #[test]
@@ -944,6 +972,7 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 mod excel_tests {
     use super::*;
+    use crate::row::Row;
     use rust_xlsxwriter::{ExcelDateTime as XlsxDateTime, Format, Workbook};
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -1038,6 +1067,23 @@ mod excel_tests {
         assert_eq!(source.rows().len(), 2);
         assert_eq!(source.rows()[0].line, 4);
         assert_eq!(source.rows()[1].line, 6);
+    }
+
+    #[test]
+    fn xlsx_duplicate_headers_are_numbered_and_keep_sheet_rows() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write(1, 0, "tag").unwrap(); // シート行 2
+        sheet.write(1, 1, "tag").unwrap();
+        sheet.write(3, 0, "A").unwrap(); // シート行 4(行 3 は空行)
+        sheet.write(3, 1, "B").unwrap();
+        let bytes = workbook.save_to_buffer().unwrap();
+        let source = TableSource::from_xlsx_bytes(&bytes, "mem.xlsx", None).unwrap();
+        assert_eq!(source.headers().columns(), ["tag", "tag#2"]);
+        assert_eq!(source.rows()[0].line, 4);
+        let cells = source.rows()[0].cells.as_ref().unwrap();
+        let row = Row::new(source.headers(), cells, source.rows()[0].line);
+        assert_eq!(row.all("tag"), vec!["A", "B"]);
     }
 
     #[test]

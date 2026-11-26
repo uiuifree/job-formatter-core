@@ -183,9 +183,43 @@ Complete runnable examples live in the crate documentation (doctests in
 | `adapter` | `CompanyAdapter` trait + parallel conversion driver (`convert_csv_path` / `convert_json_path` / `convert_jsonl_path` / `convert_source`) |
 | `media` | `MediaFormatter` trait + parallel formatting driver (`format_records`), 1 record → 0..n rows |
 | `source` | `TableSource`: CSV / Excel / JSON / JSONL readers + constructor for custom sources, per-row isolation |
-| `row` | Column access by name: `require` / `optional` / `list` / `raw_payload` |
+| `row` | Column access by name: `require` / `optional` / `list` / `all` / `raw_payload` |
 | `output` | `write_jsonl`: parallel serialization, ordered writes |
 | `error` | `ConvertError` (fatal, per source) / `RecordError` (isolated, per record) / `OutputError` |
+
+## Duplicate column names
+
+Feeds sometimes repeat a header (for example a CSV with `tag` three times).
+`Headers` keeps every column by numbering the repeats: the second and later
+ones become `tag#2`, `tag#3`, … (if such a name already exists in the header,
+the number is skipped forward until it is free). This applies to CSV, Excel and
+`TableSource::new` alike, and how rows are numbered does not change.
+
+```rust
+use job_formatter_core::row::{Headers, Row};
+
+let headers = Headers::new(vec!["id".into(), "tag".into(), "tag".into()]);
+assert_eq!(headers.columns(), ["id", "tag", "tag#2"]);
+
+let values = vec!["J1".to_string(), "A".into(), "B".into()];
+let row = Row::new(&headers, &values, 2);
+assert_eq!(row.optional("tag").as_deref(), Some("A"));   // original name → first column
+assert_eq!(row.optional("tag#2").as_deref(), Some("B")); // numbered name → that column
+assert_eq!(row.all("tag"), ["A", "B"]);                  // every column named `tag`
+```
+
+- `require` / `optional` / `list` with the original name read the first column;
+  use the numbered name to read a specific repeat
+- `all(name)` returns the values of every column whose **original** name is
+  `name`, in order, trimmed, empty values dropped. A column that was literally
+  named `tag#2` in the source is not treated as a repeat of `tag`
+- `raw_payload` holds every column under its (numbered) name
+
+**Changed in 0.2.0**: before 0.2.0 the repeats were dropped (only the first
+column was reachable and `raw_payload` omitted the rest). Reads by the original
+name return the same value as before. What changes: `columns()` lists the
+repeats as `tag#2`, `tag#3`, … instead of `tag` again, and `raw_payload` gains
+those keys.
 
 ## Design notes and non-goals
 
@@ -248,6 +282,20 @@ JSONL は `convert_jsonl_path`)→ `write_jsonl`、媒体側は `MediaFormatter`
 包まれた配列(`{"result": {"items": [...]}}`)は `convert_json_path` の第 3 引数に
 JSON Pointer(`Some("/result/items")`)を渡して選びます。実行可能な完全例は API ドキュメント
 (`src/lib.rs` の doctest)を参照してください。
+
+### 同じ名前の列
+
+見出しに同じ名前の列があると、2 つ目以降に `#2`・`#3`… を付けて区別します
+(付けた名前が見出しに元からあるときは、重ならなくなるまで番号を進めます)。
+CSV・Excel・`TableSource::new` のどれでも同じで、行番号の付け方は変わりません。
+
+- `require` / `optional` / `list` に元の名前を渡すと先頭の列、`tag#2` のように付けた名前を渡すとその列を引きます
+- `all("tag")` は元の名前が `tag` の列の値を、出てきた順に返します(前後の空白を除き、空の値は除く)。
+  元から `tag#2` という名前の列は `tag` の仲間に入れません
+- `raw_payload` は全部の列を付けた名前で持ちます
+
+**0.2.0 での変更**: 0.1 系では 2 つ目以降の列を捨てていました(先頭の列しか引けず、`raw_payload` にも残らない)。
+元の名前で引いた値は変わりません。変わるのは、`columns()` が 2 つ目以降を同じ名前ではなく `tag#2`・`tag#3`… で返すことと、`raw_payload` にそのキーが増えることです。
 
 ### 開発
 

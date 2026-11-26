@@ -6,7 +6,7 @@
 //! (例外は [`Row::raw_payload`]。監査用に生値を保持する)。
 
 use crate::error::{ConvertError, RecordError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 行番号からレコード識別子(`line:{n}`)を作る。
 /// 書式の単一情報源([`Row::record_id`] と変換ドライバの双方が使う)。
@@ -15,29 +15,72 @@ pub(crate) fn line_record_id(line: usize) -> String {
 }
 
 /// 表データのヘッダー(列名 → インデックス)。
+///
+/// 同じ名前の列が複数あると、2 つ目以降に `#2`・`#3`… を付けて区別する
+/// (例: `["id", "tag", "tag"]` → `["id", "tag", "tag#2"]`)。元の名前では先頭の列を、
+/// 付けた名前ではその列を引ける。同じ名前の列をまとめて取るには [`Row::all`] を使う。
+///
+/// ```
+/// use job_formatter_core::row::Headers;
+///
+/// let headers = Headers::new(vec!["id".into(), "tag".into(), "tag".into()]);
+/// assert_eq!(headers.columns(), ["id", "tag", "tag#2"]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Headers {
+    /// 列名の並び(trim 済み・同じ名前の列は `#n` 付きで区別済み)。
     columns: Vec<String>,
+    /// 列名(区別済み)→ 位置。
     index: BTreeMap<String, usize>,
+    /// 元の列名(trim 済み)→ その名前を持つ列の位置(出てきた順)。
+    groups: BTreeMap<String, Vec<usize>>,
 }
 
 impl Headers {
-    /// 列名の並びから構築する。列名は前後空白を除去して扱い、
-    /// 同名列が複数ある場合は最初の列を採用する。
+    /// 列名の並びから構築する。列名は前後空白を除去して扱う。
+    ///
+    /// 同じ名前の列の 2 つ目以降は `列名#2`・`列名#3`… に付け直す。付けた名前が
+    /// 元からある列名と重なる場合は、重ならなくなるまで番号を進める
+    /// (`["A", "A", "A#2"]` → `["A", "A#3", "A#2"]`)。見出しが空の列が複数ある場合も
+    /// 同じ扱い(`["", ""]` → `["", "#2"]`)。
     #[must_use]
     pub fn new(columns: Vec<String>) -> Self {
-        let columns: Vec<String> = columns
+        let originals: Vec<String> = columns
             .into_iter()
             .map(|name| name.trim().to_string())
             .collect();
+        let taken: BTreeSet<&str> = originals.iter().map(String::as_str).collect();
         let mut index = BTreeMap::new();
-        for (position, name) in columns.iter().enumerate() {
-            index.entry(name.clone()).or_insert(position);
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut next_suffix: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut unique = Vec::with_capacity(originals.len());
+        for (position, name) in originals.iter().enumerate() {
+            let column = if index.contains_key(name) {
+                let suffix = next_suffix.entry(name.as_str()).or_insert(2);
+                // 元の列名と重ならなければ一意: 付けた名前同士は最後の `#` の後ろが数字だけなので
+                // 基の名前が違えば重ならず、同じ基の名前では番号が増え続ける
+                loop {
+                    let candidate = format!("{name}#{suffix}");
+                    *suffix += 1;
+                    if !taken.contains(candidate.as_str()) {
+                        break candidate;
+                    }
+                }
+            } else {
+                name.clone()
+            };
+            index.insert(column.clone(), position);
+            groups.entry(name.clone()).or_default().push(position);
+            unique.push(column);
         }
-        Self { columns, index }
+        Self {
+            columns: unique,
+            index,
+            groups,
+        }
     }
 
-    /// 列名の並び(入力順、trim 済み)。
+    /// 列名の並び(入力順、trim 済み。同じ名前の列は `#n` 付きで区別済み)。
     #[must_use]
     pub fn columns(&self) -> &[String] {
         &self.columns
@@ -68,6 +111,11 @@ impl Headers {
 
     fn position(&self, column: &str) -> Option<usize> {
         self.index.get(column).copied()
+    }
+
+    /// 元の列名を持つ列の位置(出てきた順。無ければ空)。
+    fn positions(&self, original: &str) -> &[usize] {
+        self.groups.get(original).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -153,28 +201,57 @@ impl<'a> Row<'a> {
             .unwrap_or_default()
     }
 
+    /// 同じ名前の列の値を、出てきた順にまとめて取り出す(各値は trim 済み、空の値は除く)。
+    ///
+    /// `column` は**元の列名**(付け直す前の名前)。`#2` などの付けた名前を
+    /// 文字列として解釈しないため、元から `tag#2` という列があっても `tag` の仲間には入らない。
+    /// 列が無ければ空の `Vec`(付け直しで生まれた `tag#2` を渡したときも空。その列 1 つを引くなら
+    /// [`Row::optional`] を使う)。
+    ///
+    /// ```
+    /// use job_formatter_core::row::{Headers, Row};
+    ///
+    /// let headers = Headers::new(vec!["id".into(), "tag".into(), "tag".into(), "tag".into()]);
+    /// let values = vec!["J1".to_string(), " A ".into(), "".into(), "B".into()];
+    /// let row = Row::new(&headers, &values, 2);
+    /// assert_eq!(row.all("tag"), ["A", "B"]);
+    /// assert_eq!(row.optional("tag#3").as_deref(), Some("B"));
+    /// ```
+    #[must_use]
+    pub fn all(&self, column: &str) -> Vec<String> {
+        self.headers
+            .positions(column)
+            .iter()
+            .filter_map(|&position| self.values.get(position))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     /// 行全体を監査用 JSON(列名 → 値)にする。
     ///
-    /// 監査用に値は生のまま(trim なし)保持する。重複列は最初の列を採用し
-    /// (`require` と同じ規約)、値が欠けている列は `null` になる。
+    /// 監査用に値は生のまま(trim なし)保持する。キーは [`Headers::columns`] の名前で、
+    /// 同じ名前の列も `#2` などの名前で全部持つ。値が欠けている列は `null` になる。
     /// JSON / JSONL ソースでは `record` 列にレコードの原文が文字列として入る(二重エンコード)。
     /// 原文の保持にはこれでよく、JSON の値として持ちたいならアダプタが serde で読んだ値を持つこと。
     #[must_use]
     pub fn raw_payload(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        for (position, column) in self.headers.columns.iter().enumerate() {
-            if map.contains_key(column) {
-                // 重複列は最初の列を採用(require と同じ規約)
-                continue;
-            }
-            let value = self
-                .values
-                .get(position)
-                .map_or(serde_json::Value::Null, |value| {
-                    serde_json::Value::from(value.as_str())
-                });
-            map.insert(column.clone(), value);
-        }
+        let map = self
+            .headers
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, column)| {
+                let value = self
+                    .values
+                    .get(position)
+                    .map_or(serde_json::Value::Null, |value| {
+                        serde_json::Value::from(value.as_str())
+                    });
+                (column.clone(), value)
+            })
+            .collect();
         serde_json::Value::Object(map)
     }
 }
@@ -258,22 +335,77 @@ mod tests {
     }
 
     #[test]
-    fn raw_payload_uses_first_duplicate_and_null_for_missing() {
+    fn raw_payload_keeps_every_duplicate_column_and_null_for_missing() {
         let headers = Headers::new(values(&["id", "id", "name"]));
         let data = values(&["first", "second"]);
         let row = Row::new(&headers, &data, 2);
         let payload = row.raw_payload();
-        // 重複列は require と同じ first-wins、欠けている列は null
-        assert_eq!(payload["id"], "first");
-        assert_eq!(payload["name"], serde_json::Value::Null);
+        // 同じ名前の 2 つ目も #2 の名前で残す。欠けている列は null
+        assert_eq!(
+            payload,
+            serde_json::json!({ "id": "first", "id#2": "second", "name": null })
+        );
     }
 
     #[test]
-    fn duplicated_header_uses_first_column() {
-        let headers = Headers::new(values(&["id", "id"]));
-        let data = values(&["first", "second"]);
+    fn duplicated_headers_get_numbered_names() {
+        let headers = Headers::new(values(&["id", "tag", " tag", "tag "]));
+        assert_eq!(headers.columns(), ["id", "tag", "tag#2", "tag#3"]);
+        let data = values(&["J1", "a", "b", "c"]);
         let row = Row::new(&headers, &data, 2);
-        assert_eq!(row.require("id").unwrap(), "first");
+        // 元の名前は先頭の列、付けた名前はその列を引く
+        assert_eq!(row.require("tag").unwrap(), "a");
+        assert_eq!(row.require("tag#2").unwrap(), "b");
+        assert_eq!(row.optional("tag#3").as_deref(), Some("c"));
+        assert_eq!(row.list("tag#2", &['/']), vec!["b"]);
+        assert!(headers.ensure_columns(&["tag", "tag#3"], "a.csv").is_ok());
+    }
+
+    #[test]
+    fn numbered_names_skip_existing_column_names() {
+        // 付けた名前が元からある列名と重なるときは番号を進める
+        assert_eq!(
+            Headers::new(values(&["A", "A", "A#2"])).columns(),
+            ["A", "A#3", "A#2"]
+        );
+        // 重なりを飛ばした後も番号は続きから振る
+        assert_eq!(
+            Headers::new(values(&["A", "A", "A#2", "A"])).columns(),
+            ["A", "A#3", "A#2", "A#4"]
+        );
+        // 元から同じ名前で並ぶ「A#2」自身も区別される
+        assert_eq!(
+            Headers::new(values(&["A", "A#2", "A", "A#2"])).columns(),
+            ["A", "A#2", "A#3", "A#2#2"]
+        );
+    }
+
+    #[test]
+    fn blank_headers_are_numbered_like_any_other_name() {
+        let headers = Headers::new(values(&["id", "", " "]));
+        assert_eq!(headers.columns(), ["id", "", "#2"]);
+    }
+
+    #[test]
+    fn all_collects_values_by_original_name_in_order() {
+        let headers = Headers::new(values(&["tag", "id", "tag", "tag#2", "tag"]));
+        assert_eq!(headers.columns(), ["tag", "id", "tag#3", "tag#2", "tag#4"]);
+        let data = values(&[" A ", "J1", "", "other", "B"]);
+        let row = Row::new(&headers, &data, 2);
+        // 空の値は除き、元から「tag#2」という名前の列は tag の仲間に入れない
+        assert_eq!(row.all("tag"), vec!["A", "B"]);
+        assert_eq!(row.all("tag#2"), vec!["other"]);
+        // 同じ名前の列が 1 つだけでも、無い列でも使える
+        assert_eq!(row.all("id"), vec!["J1"]);
+        assert_eq!(row.all("ghost"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn all_skips_cells_missing_from_a_short_row() {
+        let headers = Headers::new(values(&["tag", "tag"]));
+        let data = values(&["A"]);
+        let row = Row::new(&headers, &data, 2);
+        assert_eq!(row.all("tag"), vec!["A"]);
     }
 
     #[test]

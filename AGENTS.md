@@ -57,6 +57,6 @@ cargo llvm-cov --fail-under-functions 100 --fail-uncovered-lines 2
 | `src/adapter.rs` | `CompanyAdapter` trait・並列変換ドライバ・`ConvertOutcome` |
 | `src/media.rs` | `MediaFormatter` trait・一括整形ドライバ・`MediaOutcome` |
 | `src/source.rs` | 表データ読取: `TableSource`(CSV / Excel / JSON / JSONL / 独自ソースの組み立て口・行単位エラー隔離) |
-| `src/row.rs` | 列名アクセス(`require` / `optional` / `list` / `raw_payload`) |
+| `src/row.rs` | 列名アクセス(`require` / `optional` / `list` / `all` / `raw_payload`)。同じ名前の列は `Headers::new` が `#2`・`#3`… を付けて区別する |
 | `src/output.rs` | JSONL 出力(並列シリアライズ) |
 | `src/error.rs` | `ConvertError`(致命)/ `RecordError`(隔離)/ `OutputError` |
